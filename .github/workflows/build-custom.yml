@@ -1,0 +1,347 @@
+# 定制构建流水线（架构 B：fork 源仓库）
+#
+# 本仓库是 q215613905/TVBoxOS 的 fork，源码就在自己的 main 里（该仓库默认分支是 main，不是 master）。
+# 与「fork j4Uq/TVBoxOSC」那套（架构 A，存档在 .workbuddy/archive/）的核心差别：
+#   1. 构建时不再 clone 任何外部仓库 —— actions/checkout 拿到的就是源码
+#   2. 增量判定不再依赖 README 的 (Updated: <sha>) 状态行，改读仓库内的 update.json：
+#      比对「HEAD sha + 补丁指纹」，两者都没变才跳过
+#   3. 全程只有一个写入者（本 workflow 自己）→ 没有回写竞态、没有 force push、没有 tag 撞车
+#   4. 触发多了 on: push —— 点一下 Sync fork、或改完补丁推上来，都会自动重建
+#
+# 上游 .github/workflows/test.yml 保持逐字节不动（在 Actions 页面 Disable，留着当 diff 参照）。
+# 改动点都用 [CUSTOM] 标出，便于上游升级 action 时手工对齐。
+#
+# ⚠️ 首次跑之前必须先放好 keystore：.github/workflows/TVBoxOSC.jks
+#    文件名、alias、storepass、keypass 都必须等于 TVBoxOSC —— 这些值写死在下面的
+#    Release Apk Sign 步骤里，换名字要改 workflow。
+#
+# 仓库 Settings 里要配：
+#   - Actions → General → Workflow permissions → Read and write（本文件也声明了 permissions，
+#     两处都有才最稳；只靠声明在某些账号类型下会被 Settings 覆盖）
+#   - 可选 Variables → MIRROR_BASE：NAS / 网盘直链前缀（不带结尾斜杠），App 优先从它下载
+#
+# 注意：本仓库是 public 时无需担心 Actions 分钟数；此外 .workbuddy/ 是你的本地笔记目录，
+#      别把它提交进这个公开仓库。
+
+name: Build Custom
+
+on:
+  schedule:
+    # 北京时间 16:40。与上游 TVBoxOSC 的 14:59 错开，避开调度拥堵
+    - cron: 40 8 * * *
+  push:
+    branches: [ main ]
+    # [CUSTOM] 回写 update.json 的那次推送不该再触发一轮构建
+    paths-ignore:
+      - update.json
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: '忽略构建记录以重新构建'
+        required: false
+        type: boolean
+      donotpublish:
+        description: '构建后不提交发布新版'
+        required: false
+        type: boolean
+
+concurrency:
+  # [CUSTOM] 定时 / push 触发 / 手动触发三者不会重叠
+  group: build-custom
+  cancel-in-progress: false
+
+# [CUSTOM] 显式声明写权限：回写 update.json 要用（省掉 Settings 里那个开关）
+permissions:
+  contents: write
+
+env:
+  # [CUSTOM] App 里编译期写死的检查地址。分支必须是 main —— q215613905/TVBoxOS 的
+  # 默认分支是 main（fork 后依然是 main），写成 master 会 404
+  UPDATE_JSON_RAW: https://raw.githubusercontent.com/${{ github.repository }}/main/update.json
+  UPDATE_JSON_CDN: https://cdn.jsdelivr.net/gh/${{ github.repository }}@main/update.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # [CUSTOM] 只挂一个源，矩阵仍然保留：userName 决定产物命名规则
+      #   产物名 TVBox_<userName>_<tag>-<flavor>.apk，update.json 的键与下载脚本都依赖它，
+      #   所以沿用上游的 q215613905，保持与既有 update.json / 脚本的连续性。
+      # 想再挂一个源时加一行即可；max-parallel 保证串行，避免两条腿在同一分钟撞同一个 tag。
+      max-parallel: 1
+      matrix:
+        include:
+          - userName: q215613905
+            repoName: TVBoxOS
+            # 留空 = 用 runner 默认 JDK。构建若报 Java 版本不兼容，把它改成 17 即可
+            java_ver: ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # 要完整历史：changelog 需要「上次构建的 sha ... 本次 sha」这个区间
+          fetch-depth: 0
+
+      # [CUSTOM] 替换上游的 Check New Commit + Checkout Source Code 两步。
+      # 源码已在本仓库，无需 clone；增量判定基准改为仓库内的 update.json。
+      - name: Resolve Build Gate
+        run: |
+          sha=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=7 HEAD)
+          tag=$(git log -1 --date=format:'%Y%m%d-%H%M' --pretty=format:%cd)
+          upStream=https://github.com/${{ matrix.userName }}/${{ matrix.repoName }}
+          echo "sha=${sha}"           >> $GITHUB_ENV
+          echo "short=${short}"       >> $GITHUB_ENV
+          echo "tag=${tag}"           >> $GITHUB_ENV
+          echo "upStream=${upStream}" >> $GITHUB_ENV
+
+          # 补丁目录 + 本 workflow 的内容指纹：任一变化都要重编。
+          # 没有这条，改完 UpdateChecker 推上来，定时任务会认为「没变化」而一直跳过。
+          patchHash=$( (cat $(find .github/tvbox-patch -type f | sort) .github/workflows/build-custom.yml) | sha256sum | cut -c1-16)
+          echo "patchHash=${patchHash}" >> $GITHUB_ENV
+
+          lastSha=""
+          lastPatchHash=""
+          if [ -f update.json ]; then
+            lastSha=$(sed -n 's/.*"commit": *"\([0-9a-f]\{40\}\)".*/\1/p' update.json | head -1)
+            lastPatchHash=$(sed -n 's/.*"patchHash": *"\([0-9a-f]\{16\}\)".*/\1/p' update.json | head -1)
+          fi
+          echo "上次记录：commit=${lastSha} patchHash=${lastPatchHash}"
+          echo "本次构建：commit=${sha} patchHash=${patchHash}"
+
+          if [ "${sha}" != "${lastSha}" ] || [ "${patchHash}" != "${lastPatchHash}" ] || [ "${{ inputs.rebuild }}" == "true" ]; then
+            echo "build=1" >> $GITHUB_ENV
+          else
+            echo "同一 commit 且补丁未变，跳过构建"
+          fi
+
+      - name: Extra Modify
+        if: ${{ env.build }}
+        run: |
+          echo '修改VersionName'
+          sed -i "/versionName/s#[0-9a-zA-Z_\.\'\"-]\+\$#'${{ env.tag }}'#" app/build.gradle
+          sed -i "/android:text=/s#=\"#=\"${{ env.tag }}\\\\n\\\\n#" app/src/main/res/layout/dialog_about.xml
+          # crosswalk 源，防挂。URL 用原始模板作者那份（源仓库自己的 CI 也是指向它）。
+          # 实测 root 与 app 的 build.gradle 里都没有 crosswalk / xwalk 依赖，
+          # 这行更像是模板时代遗留的保险；要追求最小依赖可以整段删掉。
+          echo 'crosswalk源，防挂'
+          if grep -q 'crosswalk' build.gradle; then
+            sed -i "/crosswalk/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+          else
+            sed -i "/jitpack.io/a\        maven { url 'https://o0halflife0o.github.io/crosswalk/releases/crosswalk/android/maven2' }" build.gradle
+          fi
+
+      # [CUSTOM] 注入应用内更新检查：拷 UpdateChecker.java、生成 6 份 flavor 资源、改 HomeActivity
+      - name: Apply Update Checker Patch
+        if: ${{ env.build }}
+        run: |
+          chmod +x .github/tvbox-patch/apply-patch.sh
+          .github/tvbox-patch/apply-patch.sh \
+            "${{ env.UPDATE_JSON_RAW }}" \
+            "${{ env.UPDATE_JSON_CDN }}"
+
+      - name: Compress Source Code
+        if: ${{ env.build }}
+        run: |
+          tar -cJf sourceCode-${{ env.short }}.tar.xz --exclude=.git --exclude=.github --exclude=update.json *
+
+      - name: Setup Python
+        if: ${{ env.build }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.8'
+
+      - name: Install Python dependencies
+        if: ${{ env.build }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install lxml ujson pyquery requests jsonpath cachetools pycryptodome beautifulsoup4
+
+      - name: Modify pyramid——build.gradle
+        if: ${{ env.build }}
+        run: |
+          # 删掉写死 Windows Python 路径的那行，改用 runner 上的 python3
+          sed -i '/buildPython.*python.exe/d' pyramid/build.gradle
+
+      - name: Setup Python local.properties
+        if: ${{ env.build }}
+        run: echo "" > local.properties
+
+      - name: Release Apk Sign
+        if: ${{ env.build }}
+        run: |
+          signingConfigs='ICAgIHNpZ25pbmdDb25maWdzIHtcCiAgICAgICAgaWYgKHByb2plY3QuaGFzUHJvcGVydHkoIlJFTEVBU0VfU1RPUkVfRklMRSIpKSB7XAogICAgICAgICAgICBteUNvbmZpZyB7XAogICAgICAgICAgICAgICAgc3RvcmVGaWxlIGZpbGUoUkVMRUFTRV9TVE9SRV9GSUxFKVwKICAgICAgICAgICAgICAgIHN0b3JlUGFzc3dvcmQgUkVMRUFTRV9TVE9SRV9QQVNTV09SRFwKICAgICAgICAgICAgICAgIGtleUFsaWFzIFJFTEVBU0VfS0VZX0FMSUFTXAogICAgICAgICAgICAgICAga2V5UGFzc3dvcmQgUkVMRUFTRV9LRVlfUEFTU1dPUkRcCiAgICAgICAgICAgICAgICB2MVNpZ25pbmdFbmFibGVkIHRydWVcCiAgICAgICAgICAgICAgICB2MlNpZ25pbmdFbmFibGVkIHRydWVcCiAgICAgICAgICAgICAgICBlbmFibGVWM1NpZ25pbmcgPSB0cnVlXAogICAgICAgICAgICAgICAgZW5hYmxlVjRTaWduaW5nID0gdHJ1ZVwKICAgICAgICAgICAgfVwKICAgICAgICB9XAogICAgfVwKXA=='
+          signingConfig='ICAgICAgICAgICAgaWYgKHByb2plY3QuaGFzUHJvcGVydHkoIlJFTEVBU0VfU1RPUkVfRklMRSIpKSB7XAogICAgICAgICAgICAgICAgc2lnbmluZ0NvbmZpZyBzaWduaW5nQ29uZmlncy5teUNvbmZpZ1wKICAgICAgICAgICAgfVwK'
+          signingConfigs="$(echo "$signingConfigs" |base64 -d )"
+          signingConfig="$(echo "$signingConfig" |base64 -d )"
+          sed -i -e "/defaultConfig {/i\\$signingConfigs " -e "/debug {/a\\$signingConfig " -e "/release {/a\\$signingConfig " app/build.gradle
+          cp -f .github/workflows/TVBoxOSC.jks app/TVBoxOSC.jks
+          sed -i '$a\RELEASE_STORE_FILE=./TVBoxOSC.jks'     ./gradle.properties
+          sed -i '$a\RELEASE_KEY_ALIAS=TVBoxOSC'            ./gradle.properties
+          sed -i '$a\RELEASE_STORE_PASSWORD=TVBoxOSC'       ./gradle.properties
+          sed -i '$a\RELEASE_KEY_PASSWORD=TVBoxOSC'         ./gradle.properties
+
+      - uses: actions/setup-java@v6
+        if: ${{ matrix.java_ver }}
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java_ver }}
+
+      - uses: gradle/actions/setup-gradle@v6.2.0
+        if: ${{ env.build }}
+
+      - name: Build With Gradle
+        if: ${{ env.build }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assemblerelease --build-cache --parallel --daemon --warning-mode all
+
+      - name: Prepare App
+        if: ${{ env.build }}
+        run: |
+          rm -rf apk/
+          mkdir -p apk/
+          for file in `find ~ -name "*release*.apk" -print`; do
+            base=$(basename "$file")
+            if [[ "$base" == TVBox_* ]]; then
+              new_base=$(echo "$base" | sed "s/release/${{ matrix.userName }}_${{ env.tag }}/")
+            else
+              new_base="TVBox_${{ matrix.userName }}_${{ env.tag }}.apk"
+            fi
+            mv "$file" "apk/$new_base"
+          done
+          mv sourceCode-${{ env.short }}.* apk/
+          echo '产物清单：'
+          ls -lh apk/
+
+      # [CUSTOM] changelog 区间改为用 update.json 里记录的上次 commit
+      - name: Release Note
+        if: ${{ env.build }}
+        run: |
+          lastCommit=""
+          if [ -f update.json ]; then
+            lastCommit=$(sed -n 's/.*"commit": *"\([0-9a-f]\{40\}\)".*/\1/p' update.json | head -1)
+          fi
+          export LESSCHARSET=utf-8
+          echo -e "Credit: [${{ matrix.userName }}](${{ env.upStream }})\nCommit: ${{ env.sha }}\nChangelog:\n\`\`\`" > apk/${{ matrix.userName }}-Release.log
+          # 上次的 sha 必须仍然是本仓库的一个提交，否则区间语法会直接报错
+          if [ -n "${lastCommit}" ] && [ "${lastCommit}" != "${{ env.sha }}" ] && git cat-file -e "${lastCommit}^{commit}" 2>/dev/null; then
+            git log --pretty=format:%B ${{ env.sha }}...${lastCommit} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/${{ matrix.userName }}-Release.log
+          else
+            git log --pretty=format:%B -1 ${{ env.sha }} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/${{ matrix.userName }}-Release.log
+          fi
+          echo -e '\n```' >> apk/${{ matrix.userName }}-Release.log
+
+      - name: Upload App To Artifact
+        uses: actions/upload-artifact@v7
+        if: ${{ env.build }}
+        with:
+          name: ${{ matrix.userName }}-${{ matrix.repoName }}
+          path: |
+            apk/*
+
+      - name: Whether Or Not to Publish
+        if: ${{ inputs.donotpublish && env.build }}
+        run: |
+          echo "build=" >> $GITHUB_ENV
+
+      # [CUSTOM] 生成 App 读取的版本清单。下载地址优先指向 MIRROR_BASE（NAS），回落 GitHub。
+      # 同时把本次 commit 与补丁指纹写进去 —— 它们是下一轮增量判定的唯一依据。
+      - name: Generate update.json
+        if: ${{ env.build }}
+        working-directory: apk
+        env:
+          TAG: ${{ env.tag }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ env.sha }}
+          PATCH_HASH: ${{ env.patchHash }}
+          MIRROR: ${{ vars.MIRROR_BASE }}
+          OUT: ${{ github.workspace }}/update.json
+        run: |
+          python3 - <<'PY'
+          import datetime, hashlib, json, os
+
+          tag = os.environ['TAG'].strip()
+          repo = os.environ['REPO'].strip()
+          mirror = os.environ.get('MIRROR', '').strip().rstrip('/')
+          out = os.environ['OUT']
+
+          variants = {}
+          for fn in sorted(os.listdir('.')):
+              if not fn.endswith('.apk'):
+                  continue
+              stem = fn[:-4]
+              if (tag + '-') not in stem:
+                  raise SystemExit('产物名里没有 tag，无法识别变体: ' + fn)
+              key = stem.split(tag + '-', 1)[1]
+              gh = 'https://github.com/%s/releases/download/%s/%s' % (repo, tag, fn)
+              h = hashlib.sha256()
+              with open(fn, 'rb') as fh:
+                  for chunk in iter(lambda: fh.read(1 << 20), b''):
+                      h.update(chunk)
+              variants[key] = {
+                  'file': fn,
+                  'size': os.path.getsize(fn),
+                  'sha256': h.hexdigest(),
+                  'url': ('%s/%s' % (mirror, fn)) if mirror else gh,
+                  'fallback': gh,
+              }
+
+          if not variants:
+              raise SystemExit('没有找到任何 apk，update.json 不生成')
+
+          data = {
+              'version': tag,
+              'repo': repo,
+              'commit': os.environ['SHA'].strip(),
+              'patchHash': os.environ['PATCH_HASH'].strip(),
+              'built_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'release_url': 'https://github.com/%s/releases/tag/%s' % (repo, tag),
+              'variants': variants,
+          }
+          with open(out, 'w', encoding='utf-8') as fh:
+              fh.write(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          PY
+          echo "已写入 ${{ github.workspace }}/update.json"
+
+      - name: Release and Upload Assets
+        uses: ncipollo/release-action@v1
+        if: ${{ env.build }}
+        with:
+          name: ${{ env.tag }}
+          tag: ${{ env.tag }}
+          bodyFile: apk/${{ matrix.userName }}-Release.log
+          allowUpdates: true
+          removeArtifacts: true
+          artifacts: |
+            apk/*.apk
+            apk/sourceCode-${{ env.short }}.*
+
+      # [CUSTOM] 替换上游的 Push to master：不再改 README（没有状态行要维护了），
+      # 只回写 update.json。仓库里只有这一个写入者，所以不需要 pull / rebase / force push。
+      - name: Commit update.json
+        if: ${{ env.build }}
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          if git diff --cached --quiet; then
+            echo "update.json 没有变化"
+            exit 0
+          fi
+          git commit -m "chore: update build record for ${{ env.tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+
+  clean:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete older workflow runs and artifacts
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 14
+          keep_minimum_runs: 10

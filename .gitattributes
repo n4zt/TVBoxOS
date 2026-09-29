@@ -1,0 +1,14 @@
+# 只约束会真正影响构建的文件，刻意不对整个仓库做换行归一化
+# （那会给上游那几百个文件制造无意义的 diff 噪音）
+#
+# 存在的理由：apply-patch.sh 在 CI 里靠 shebang 执行，带 CRLF 会直接报
+#   bash: .github/tvbox-patch/apply-patch.sh: /usr/bin/env bash^M: bad interpreter
+# 显式 eol=lf 后，无论本机 core.autocrlf 怎么设、走网页编辑还是本地提交，仓库里都是 LF。
+
+*.sh       text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+
+# keystore 是二进制，绝不能被当成文本做换行转换
+*.jks      binary
+*.keystore binary
