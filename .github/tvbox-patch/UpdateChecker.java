@@ -82,6 +82,12 @@ public class UpdateChecker {
     /** 并发探测的总等待上限：到点还没人成功就认输 */
     private static final long PROBE_TOTAL_WAIT_MS = 9000L;
 
+    /** 下载状态轮询：1.5 秒一次，最长约 1 小时 */
+    private static final int POLL_INTERVAL_MS = 1500;
+    private static final int POLL_MAX_TRIES = 2400;
+    /** 连续几次查不到下载记录就认定它被清理了（首次查询理论上已入库，仍宽容几次） */
+    private static final int POLL_MISS_TOLERANCE = 4;
+
     private static volatile boolean running = false;
     private static String lastPrompted = null;
 
@@ -514,22 +520,32 @@ public class UpdateChecker {
         }
     }
 
-    /** DownloadManager 没有可靠的跨进程回调，直接轮询；最长等约 1 小时。 */
+    /**
+     * DownloadManager 没有可靠的跨进程回调，只能轮询。三种收工条件：
+     *   1. 拿到终态（成功 → 校验安装；失败 → 换源重试）
+     *   2. 下载记录从下载库里消失（被用户清空 / 被系统回收）——再等也等不到状态变化
+     *   3. 等满 POLL_MAX_TRIES 次仍未完成（约 1 小时）——给用户一句明确的话，别静默结束
+     * 注意区分「查不到记录」和「从未入库」：首次查询允许几次落空（MISS_TOLERANCE）。
+     */
     private static void pollDownload(final Activity a, final DownloadManager dm, final long id,
                                      final String file, final String expectSha,
                                      final List<String> urls, final int idx, final String version) {
         final Handler h = new Handler(Looper.getMainLooper());
         h.postDelayed(new Runnable() {
             int tries = 0;
+            /** 曾经查到过记录。查过又消失 ⇒ 是被外部清理了，可以直接收工 */
+            boolean seen = false;
 
             @Override
             public void run() {
                 tries++;
                 Cursor c = null;
                 int failedReason = -1;
+                boolean found = false;
                 try {
                     c = dm.query(new DownloadManager.Query().setFilterById(id));
                     if (c != null && c.moveToFirst()) {
+                        found = true;
                         int status = c.getInt(c.getColumnIndex(DownloadManager.COLUMN_STATUS));
                         if (status == DownloadManager.STATUS_SUCCESSFUL) {
                             // 把候选列表一并传下去：sha256 校验不过时要能换下一个源重试
@@ -560,11 +576,26 @@ public class UpdateChecker {
                     enqueueDownload(a, urls, idx + 1, file, expectSha, version);
                     return;
                 }
-                if (tries < 2400) {
-                    h.postDelayed(this, 1500);
+
+                if (found) {
+                    seen = true;
+                } else if (seen || tries >= POLL_MISS_TOLERANCE) {
+                    // 记录没了：外部清空下载、或系统回收了任务。继续轮询只会空转到超时
+                    Log.w(TAG, "下载记录已消失（第 " + tries + " 次查询），停止轮询");
+                    Toast.makeText(a, "下载任务已丢失，请重新点击升级", Toast.LENGTH_LONG).show();
+                    return;
                 }
+
+                if (tries >= POLL_MAX_TRIES) {
+                    // 原来是静默结束，用户会以为"点了没反应"
+                    Log.w(TAG, "等待下载超时（" + (POLL_MAX_TRIES * POLL_INTERVAL_MS / 60000)
+                            + " 分钟），停止轮询");
+                    Toast.makeText(a, "下载超时，请重新点击升级", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                h.postDelayed(this, POLL_INTERVAL_MS);
             }
-        }, 1500);
+        }, POLL_INTERVAL_MS);
     }
 
     @SuppressWarnings("deprecation")
