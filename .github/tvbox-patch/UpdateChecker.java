@@ -532,7 +532,8 @@ public class UpdateChecker {
                     if (c != null && c.moveToFirst()) {
                         int status = c.getInt(c.getColumnIndex(DownloadManager.COLUMN_STATUS));
                         if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                            install(a, file, expectSha);
+                            // 把候选列表一并传下去：sha256 校验不过时要能换下一个源重试
+                            install(a, file, expectSha, urls, idx, version);
                             return;
                         }
                         if (status == DownloadManager.STATUS_FAILED) {
@@ -579,8 +580,17 @@ public class UpdateChecker {
         }
     }
 
+    /**
+     * 下载成功后校验并拉起安装。
+     *
+     * sha256 不过就当作「这个源不可用」——删掉文件、换下一个候选源重试。
+     * 典型场景：某个代理返回 200 但内容是 HTML 错误页，DownloadManager 会认为下载成功。
+     * 注意重试不影响安全性：sha256 仍然是唯一的放行依据，任何一个源都过不了就整体中止，
+     * 绝不会安装未通过校验的文件（fail-closed）。
+     */
     @SuppressWarnings("deprecation")
-    private static void install(Activity a, String file, String expectSha) {
+    private static void install(Activity a, String file, String expectSha,
+                                List<String> urls, int idx, String version) {
         try {
             File apk = new File(Environment.getExternalStoragePublicDirectory(
                     Environment.DIRECTORY_DOWNLOADS), file);
@@ -592,8 +602,16 @@ public class UpdateChecker {
                 String actual = sha256(apk);
                 if (!expectSha.equalsIgnoreCase(actual)) {
                     apk.delete();
-                    Log.w(TAG, "校验失败 期望=" + expectSha + " 实际=" + actual);
-                    Toast.makeText(a, "安装包校验失败，已删除", Toast.LENGTH_LONG).show();
+                    Log.w(TAG, "源 " + (idx + 1) + "/" + urls.size() + " 校验失败，期望="
+                            + expectSha + " 实际=" + actual + " <- " + urls.get(idx));
+                    if (idx + 1 >= urls.size()) {
+                        Toast.makeText(a, "所有下载源都没通过完整性校验，已中止",
+                                Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    Toast.makeText(a, "第 " + (idx + 1) + " 个源校验失败，换源重试",
+                            Toast.LENGTH_LONG).show();
+                    enqueueDownload(a, urls, idx + 1, file, expectSha, version);
                     return;
                 }
             }
