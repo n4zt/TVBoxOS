@@ -3,7 +3,9 @@
 # 在上游源码（CI 运行时 clone 出来的 TVBoxOSC/）里注入应用内更新检查。
 #
 # 用法（工作目录必须是源码仓库根）：
-#   apply-patch.sh <update_json_raw_url> <update_json_cdn_url>
+#   apply-patch.sh <update_json_raw_url> <update_json_cdn_url> [mirror_prefixes]
+#     mirror_prefixes：逗号分隔的代理前缀，如 https://gh-proxy.com/,https://ghfast.top/
+#                      （可选，留空表示不用代理）
 #
 # 幂等：重复执行不会重复注入。
 #
@@ -19,6 +21,10 @@ PYTHON_BIN="${PYTHON:-python3}"
 
 UPDATE_JSON_RAW="${1:-}"
 UPDATE_JSON_CDN="${2:-}"
+UPDATE_JSON_MIRRORS="${3:-}"
+
+# 代理前缀要进 sed 替换串，需转义 \ & | 这三个特殊字符
+escape_sed() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 
 if [ ! -f "$HOME_ACT" ]; then
   echo "[patch] 找不到 $HOME_ACT，工作目录不对？当前：$(pwd)" >&2
@@ -35,9 +41,12 @@ fi
 if [ -n "$UPDATE_JSON_CDN" ]; then
   sed -i "s|__UPDATE_JSON_CDN__|${UPDATE_JSON_CDN}|g" "$UTIL_DIR/UpdateChecker.java"
 fi
+if [ -n "$UPDATE_JSON_MIRRORS" ]; then
+  sed -i "s|__UPDATE_JSON_MIRRORS__|$(escape_sed "$UPDATE_JSON_MIRRORS")|g" "$UTIL_DIR/UpdateChecker.java"
+fi
 # 清掉残留占位符，避免把非法字符串编进 APK
-sed -i "s|__UPDATE_JSON_RAW__||g; s|__UPDATE_JSON_CDN__||g" "$UTIL_DIR/UpdateChecker.java"
-grep -n 'UPDATE_JSON_RAW\|UPDATE_JSON_CDN' "$UTIL_DIR/UpdateChecker.java" || true
+sed -i "s|__UPDATE_JSON_RAW__||g; s|__UPDATE_JSON_CDN__||g; s|__UPDATE_JSON_MIRRORS__||g" "$UTIL_DIR/UpdateChecker.java"
+grep -n 'UPDATE_JSON_RAW\|UPDATE_JSON_CDN\|UPDATE_JSON_MIRRORS' "$UTIL_DIR/UpdateChecker.java" || true
 
 echo "[patch] 2/4 为 6 个 flavor 生成版本标识资源"
 for f in $FLAVORS; do

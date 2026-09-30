@@ -19,6 +19,11 @@
 #   - Actions → General → Workflow permissions → Read and write（本文件也声明了 permissions，
 #     两处都有才最稳；只靠声明在某些账号类型下会被 Settings 覆盖）
 #   - 可选 Variables → MIRROR_BASE：NAS / 网盘直链前缀（不带结尾斜杠），App 优先从它下载
+#   - 可选 Variables → PROXY_PREFIXES：GitHub 直链的代理前缀，逗号分隔，例如
+#       https://gh-proxy.com/,https://ghfast.top/,https://ghproxy.net/
+#     作用有两个：注入到 App 里给「更新检查」当兜底源；写进 update.json 的 mirrors，
+#     供 App 下载 APK 时拼候选源。留空则完全不使用代理。
+#     ⚠️ 这些是第三方公共服务，可用性会变；改动需重编才影响更新检查（下载那条改 update.json 即生效）
 #
 # 注意：本仓库是 public 时无需担心 Actions 分钟数；此外 .workbuddy/ 是你的本地笔记目录，
 #      别把它提交进这个公开仓库。
@@ -65,9 +70,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # [CUSTOM] 只挂一个源，矩阵仍然保留：userName 决定产物命名规则
-      #   产物名 TVBox_<userName>_<tag>-<flavor>.apk，update.json 的键与下载脚本都依赖它，
-      #   所以沿用上游的 q215613905，保持与既有 update.json / 脚本的连续性。
+      # [CUSTOM] 只挂一个源，矩阵仍然保留：userName/repoName 现在只用来拼
+      #   release body 里的 Credit 链接（署名归上游作者），**不再参与产物命名**。
+      #   产物名已改成 TVBox_<tag>-<flavor>.apk。
       # 想再挂一个源时加一行即可；max-parallel 保证串行，避免两条腿在同一分钟撞同一个 tag。
       max-parallel: 1
       matrix:
@@ -139,7 +144,8 @@ jobs:
           chmod +x .github/tvbox-patch/apply-patch.sh
           .github/tvbox-patch/apply-patch.sh \
             "${{ env.UPDATE_JSON_RAW }}" \
-            "${{ env.UPDATE_JSON_CDN }}"
+            "${{ env.UPDATE_JSON_CDN }}" \
+            "${{ vars.PROXY_PREFIXES }}"
 
       - name: Compress Source Code
         if: ${{ env.build }}
@@ -197,6 +203,11 @@ jobs:
           chmod +x gradlew
           ./gradlew assemblerelease --build-cache --parallel --daemon --warning-mode all
 
+      # [CUSTOM] 产物名去掉了上游那个 userName 段：
+      #   TVBox_release-java64.apk  ->  TVBox_20260930-1000-java64.apk
+      # gen.py 是用「按 <tag>- 切分」来取变体键的（stem.split(tag+'-',1)[1]），
+      # 所以去掉中间那段不影响变体识别；update.json 的 file 字段也跟着自动变。
+      # userName 只保留在 release body 的 Credit 里（署名归上游作者）。
       - name: Prepare App
         if: ${{ env.build }}
         run: |
@@ -205,9 +216,9 @@ jobs:
           for file in `find ~ -name "*release*.apk" -print`; do
             base=$(basename "$file")
             if [[ "$base" == TVBox_* ]]; then
-              new_base=$(echo "$base" | sed "s/release/${{ matrix.userName }}_${{ env.tag }}/")
+              new_base=$(echo "$base" | sed "s/release/${{ env.tag }}/")
             else
-              new_base="TVBox_${{ matrix.userName }}_${{ env.tag }}.apk"
+              new_base="TVBox_${{ env.tag }}.apk"
             fi
             mv "$file" "apk/$new_base"
           done
@@ -224,20 +235,21 @@ jobs:
             lastCommit=$(sed -n 's/.*"commit": *"\([0-9a-f]\{40\}\)".*/\1/p' update.json | head -1)
           fi
           export LESSCHARSET=utf-8
-          echo -e "Credit: [${{ matrix.userName }}](${{ env.upStream }})\nCommit: ${{ env.sha }}\nChangelog:\n\`\`\`" > apk/${{ matrix.userName }}-Release.log
+          echo -e "Credit: [${{ matrix.userName }}](${{ env.upStream }})\nCommit: ${{ env.sha }}\nChangelog:\n\`\`\`" > apk/TVBox-Release.log
           # 上次的 sha 必须仍然是本仓库的一个提交，否则区间语法会直接报错
           if [ -n "${lastCommit}" ] && [ "${lastCommit}" != "${{ env.sha }}" ] && git cat-file -e "${lastCommit}^{commit}" 2>/dev/null; then
-            git log --pretty=format:%B ${{ env.sha }}...${lastCommit} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/${{ matrix.userName }}-Release.log
+            git log --pretty=format:%B ${{ env.sha }}...${lastCommit} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/TVBox-Release.log
           else
-            git log --pretty=format:%B -1 ${{ env.sha }} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/${{ matrix.userName }}-Release.log
+            git log --pretty=format:%B -1 ${{ env.sha }} |sed -e "s# \{2,\}#\n#g" -e "/^Merge \(pull\|branch\|remote\)/d" -e '/^$/d' |cat -n |sort -k2,2 -k1,1n |uniq -f1 |sort -k1,1n |cut -f2- >> apk/TVBox-Release.log
           fi
-          echo -e '\n```' >> apk/${{ matrix.userName }}-Release.log
+          echo -e '\n```' >> apk/TVBox-Release.log
 
       - name: Upload App To Artifact
         uses: actions/upload-artifact@v7
         if: ${{ env.build }}
         with:
-          name: ${{ matrix.userName }}-${{ matrix.repoName }}
+          # [CUSTOM] 上游是 <userName>-<repoName>，同样是去掉中间商痕迹
+          name: TVBoxOS-${{ env.tag }}
           path: |
             apk/*
 
@@ -247,6 +259,7 @@ jobs:
           echo "build=" >> $GITHUB_ENV
 
       # [CUSTOM] 生成 App 读取的版本清单。下载地址优先指向 MIRROR_BASE（NAS），回落 GitHub。
+      # mirrors 字段是 GitHub 直链的代理前缀列表，App 会用它拼候选源去做并发测速选源。
       # 同时把本次 commit 与补丁指纹写进去 —— 它们是下一轮增量判定的唯一依据。
       - name: Generate update.json
         if: ${{ env.build }}
@@ -257,6 +270,7 @@ jobs:
           SHA: ${{ env.sha }}
           PATCH_HASH: ${{ env.patchHash }}
           MIRROR: ${{ vars.MIRROR_BASE }}
+          MIRRORS: ${{ vars.PROXY_PREFIXES }}
           OUT: ${{ github.workspace }}/update.json
         run: |
           python3 - <<'PY'
@@ -266,6 +280,9 @@ jobs:
           repo = os.environ['REPO'].strip()
           mirror = os.environ.get('MIRROR', '').strip().rstrip('/')
           out = os.environ['OUT']
+          # 代理前缀：写进 update.json 的 mirrors 字段，App 下载 APK 时会拿它拼候选源
+          mirrors = [p.strip() for p in os.environ.get('MIRRORS', '').split(',')
+                     if p.strip() and not p.strip().startswith('__')]
 
           variants = {}
           for fn in sorted(os.listdir('.')):
@@ -298,6 +315,7 @@ jobs:
               'patchHash': os.environ['PATCH_HASH'].strip(),
               'built_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
               'release_url': 'https://github.com/%s/releases/tag/%s' % (repo, tag),
+              'mirrors': mirrors,
               'variants': variants,
           }
           with open(out, 'w', encoding='utf-8') as fh:
@@ -312,7 +330,7 @@ jobs:
         with:
           name: ${{ env.tag }}
           tag: ${{ env.tag }}
-          bodyFile: apk/${{ matrix.userName }}-Release.log
+          bodyFile: apk/TVBox-Release.log
           allowUpdates: true
           removeArtifacts: true
           artifacts: |
