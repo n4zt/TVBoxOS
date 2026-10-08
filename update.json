@@ -1,53 +1,53 @@
 {
-  "version": "20260930-0835",
+  "version": "20261006-1533",
   "repo": "n4zt/TVBoxOS",
-  "commit": "53eb5641c2593c42344a71a6a00780fc994f1ab8",
-  "patchHash": "ef2d74dac8193975",
-  "built_at": "2026-09-30T00:44:01Z",
-  "release_url": "https://github.com/n4zt/TVBoxOS/releases/tag/20260930-0835",
+  "commit": "daaa4f4a3da2f2c95392c0db0b4cef30ad6e1087",
+  "patchHash": "d1b3d05128668088",
+  "built_at": "2026-10-07T15:51:10Z",
+  "release_url": "https://github.com/n4zt/TVBoxOS/releases/tag/20261006-1533",
   "mirrors": [],
   "variants": {
     "java": {
-      "file": "TVBox_20260930-0835-java.apk",
-      "size": 33304278,
-      "sha256": "405afa65965db4f600e377ebaae0d483d2df3ed6a67cb4f1ae4c1aeee4b06258",
-      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-java.apk",
-      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-java.apk"
+      "file": "TVBox_20261006-1533-java.apk",
+      "size": 33304483,
+      "sha256": "7463ce354a3b9620c4b3a7d13e244f59b2974db6f47cd8776cac93518dd3067e",
+      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-java.apk",
+      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-java.apk"
     },
     "java32": {
-      "file": "TVBox_20260930-0835-java32.apk",
-      "size": 19805326,
-      "sha256": "e7111f1323b7255ecfe171fc3817213bd83ef4e55f308663f327211b8bbd190e",
-      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-java32.apk",
-      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-java32.apk"
+      "file": "TVBox_20261006-1533-java32.apk",
+      "size": 19805542,
+      "sha256": "c9d09560c824cb92560f1ac25eae8bec78513b727f47c97fbf8b17ea58cb7cd3",
+      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-java32.apk",
+      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-java32.apk"
     },
     "java64": {
-      "file": "TVBox_20260930-0835-java64.apk",
-      "size": 20770529,
-      "sha256": "281ad389e1d28b600c7e7cb55eeb736fdb3a04ab65406f0c6dd3df5f9e8f86d3",
-      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-java64.apk",
-      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-java64.apk"
+      "file": "TVBox_20261006-1533-java64.apk",
+      "size": 20771101,
+      "sha256": "75f54c6af3b5ba00733a801765c963148d0e203e391f4fe7a39852671d2953c3",
+      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-java64.apk",
+      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-java64.apk"
     },
     "python": {
-      "file": "TVBox_20260930-0835-python.apk",
-      "size": 52628363,
-      "sha256": "1f0888f6edea3da43988b5da2e3936c47495756382832dfb82d139434a918c1b",
-      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-python.apk",
-      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-python.apk"
+      "file": "TVBox_20261006-1533-python.apk",
+      "size": 52628362,
+      "sha256": "6ed98d6f0cd0c7f1cfc04682fa164859b0e99c7e9334b39e0f7ffd94259f5dab",
+      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-python.apk",
+      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-python.apk"
     },
     "python32": {
-      "file": "TVBox_20260930-0835-python32.apk",
-      "size": 31609134,
-      "sha256": "66a37f7108987b19bcbd78ee51838fafc3809dea297a2c190a6d2fa94c9b98b9",
-      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-python32.apk",
-      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-python32.apk"
+      "file": "TVBox_20261006-1533-python32.apk",
+      "size": 31609327,
+      "sha256": "ff82ce992745471eab5f865964be0dc3a962994fca5a9e0406432bcb23ec0fa9",
+      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-python32.apk",
+      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-python32.apk"
     },
     "python64": {
-      "file": "TVBox_20260930-0835-python64.apk",
-      "size": 33057838,
-      "sha256": "3d3349078dbbbf96ec156c99f689265ac892dbc377a5627afa12451674bfe268",
-      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-python64.apk",
-      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20260930-0835/TVBox_20260930-0835-python64.apk"
+      "file": "TVBox_20261006-1533-python64.apk",
+      "size": 33057985,
+      "sha256": "0fff35e675ae781d640ea42ff57f76d72dc9a5a725ef420b8b12faa98fcd5676",
+      "url": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-python64.apk",
+      "fallback": "https://github.com/n4zt/TVBoxOS/releases/download/20261006-1533/TVBox_20261006-1533-python64.apk"
     }
   }
 }
