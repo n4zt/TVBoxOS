@@ -92,8 +92,19 @@ jobs:
       # 源码已在本仓库，无需 clone；增量判定基准改为仓库内的 update.json。
       - name: Resolve Build Gate
         run: |
-          sha=$(git rev-parse HEAD)
-          short=$(git rev-parse --short=7 HEAD)
+          # ⚠️ 这里必须排除 update.json 本身，否则会陷入「每天重编一次」的死循环：
+          #   本 workflow 每次发布会回写 update.json 并提交 → 那产生一个新提交 →
+          #   下一轮把 HEAD 与上次记录的 commit 一比，永远"不相等" → 天天重编。
+          #   （2026-09-30 至 10-07 实际就这样连跑了 8 天，内容完全一样。）
+          # 用 pathspec 只认「真正改了源码/补丁」的最近一次提交，它在 bot 回写后保持不变。
+          sha=$(git log -1 --format=%H -- . ':(exclude)update.json')
+          if [ -z "$sha" ]; then
+            echo "取不到有效提交（仓库里没有任何非 update.json 的提交？）" >&2
+            exit 1
+          fi
+          short="${sha:0:7}"
+          # tag 仍取 HEAD 的提交时间：它必须单调递增。若改用上面那个 sha 的日期，
+          # 补丁变更时版本号会回退到旧日期，App 就再也不会提示更新了。
           tag=$(git log -1 --date=format:'%Y%m%d-%H%M' --pretty=format:%cd)
           upStream=https://github.com/${{ matrix.userName }}/${{ matrix.repoName }}
           echo "sha=${sha}"           >> $GITHUB_ENV
