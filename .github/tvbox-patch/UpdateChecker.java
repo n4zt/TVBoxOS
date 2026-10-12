@@ -1,21 +1,27 @@
 package com.github.tvbox.osc.util;
 
 import android.app.Activity;
-import android.app.DownloadManager;
+import android.app.Dialog;
+import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.database.Cursor;
+import android.content.IntentFilter;
+import android.content.pm.PackageInstaller;
 import android.net.Uri;
 import android.os.Build;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
-import androidx.core.app.ActivityCompat;
 import androidx.core.content.FileProvider;
 
 import com.github.tvbox.osc.BuildConfig;
@@ -28,7 +34,10 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.security.MessageDigest;
@@ -59,8 +68,12 @@ import java.util.concurrent.TimeUnit;
  *      实时源（官方 raw + 代理）优先；都不可达才退到 jsDelivr，
  *      因为 jsDelivr 对仓库有约 12 小时缓存，可能返回旧清单。
  *   2. 下载 APK：候选源（自建镜像 url → GitHub 直链 fallback → 直链套各个代理）
- *      先并发探通断，选最快的那个交给 DownloadManager；
- *      下载中途失败会自动换下一个源重试，直到候选用完。
+ *      先并发探通断，选最快的那个开始下载；下载中途失败会自动换下一个源重试，
+ *      直到候选用完。
+ *   3. 下载**集成在应用内**（HttpURLConnection + 自己的进度对话框），不再交给系统
+ *      DownloadManager —— 后者会把文件丢进公共 Download 目录，在电视盒上经常出现
+ *      「下载完找不到、点了装不了」。应用内下载落点在 getExternalFilesDir() 下的私有目录，
+ *      FileProvider 的 file_paths.xml 已经覆盖它（Android/data/），所以不需要存储权限。
  *
  * 版本比较：上游把 versionName 改写成构建时间戳 20260929-1939，格式零填充、单调递增，
  * 所以直接做字符串比较，不需要自建版本体系。
@@ -444,10 +457,15 @@ public class UpdateChecker {
                 return;
             }
 
-            if (Build.VERSION.SDK_INT >= 23) {
-                // 目标是公共 Download 目录，部分 ROM 需要存储权限
-                ActivityCompat.requestPermissions(a,
-                        new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, 0x7751);
+            // 先把「允许安装未知来源」问掉，省得下完 20MB 才发现装不了
+            if (Build.VERSION.SDK_INT >= 26 && !a.getPackageManager().canRequestPackageInstalls()) {
+                Toast.makeText(a, "请先允许本应用安装未知来源的应用，然后重新点击升级",
+                        Toast.LENGTH_LONG).show();
+                Intent s = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + a.getPackageName()));
+                s.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                a.startActivity(s);
+                return;
             }
 
             Toast.makeText(a, "正在选择最快的下载源…", Toast.LENGTH_SHORT).show();
@@ -473,7 +491,9 @@ public class UpdateChecker {
                                         Toast.LENGTH_LONG).show();
                                 return;
                             }
-                            enqueueDownload(a, ordered, 0, file, expectSha, version);
+                            downloadCancelled = false;
+                            showProgressDialog(a, file, version);
+                            downloadNext(a, ordered, 0, file, expectSha, version);
                         }
                     });
                 }
@@ -486,163 +506,288 @@ public class UpdateChecker {
         }
     }
 
-    /** 按候选列表逐个尝试，失败自动换下一个源 */
-    private static void enqueueDownload(final Activity a, final List<String> urls, final int idx,
-                                        final String file, final String expectSha,
-                                        final String version) {
+    /** 下载目录：应用私有外部目录 /sdcard/Android/data/<pkg>/files/update。
+     *  file_paths.xml 已覆盖 Android/data/（所以能共享给安装器），且不需要任何存储权限
+     *  —— 不再依赖系统 DownloadManager（它把文件丢进公共 Download 目录，电视盒上经常
+     *  「下载完找不到、点了装不了」）。 */
+    private static File downloadDir(Activity a) {
+        File d = new File(a.getExternalFilesDir(null), "update");
+        if (!d.exists() && !d.mkdirs()) {
+            Log.w(TAG, "创建下载目录失败: " + d.getAbsolutePath());
+        }
+        return d;
+    }
+
+    /** 用户点「取消下载」时置位，下载循环看到就主动收工 */
+    private static volatile boolean downloadCancelled = false;
+
+    /** 下载结果的四种出口 */
+    private static final int DL_OK = 0, DL_FAILED = 1, DL_SHA = 2, DL_CANCELLED = 3;
+
+    private static Dialog progressDialog;
+    private static ProgressBar progressBar;
+    private static TextView progressText;
+    private static Handler progressHandler;
+
+    /** 进度对话框：纯代码搭，不依赖任何新增资源 */
+    private static void showProgressDialog(Activity a, String file, String version) {
+        dismissProgressDialog();
+        float density = a.getResources().getDisplayMetrics().density;
+        int pad = (int) (16 * density + 0.5f);
+
+        LinearLayout root = new LinearLayout(a);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(pad, pad, pad, pad);
+
+        TextView title = new TextView(a);
+        title.setText("正在下载 TVBox " + version);
+        title.setTextSize(16);
+        root.addView(title);
+
+        TextView sub = new TextView(a);
+        sub.setText(file);
+        sub.setTextSize(12);
+        root.addView(sub);
+
+        progressBar = new ProgressBar(a, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setProgress(0);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        int m = (int) (8 * density + 0.5f);
+        blp.topMargin = m;
+        blp.bottomMargin = m;
+        progressBar.setLayoutParams(blp);
+        root.addView(progressBar);
+
+        progressText = new TextView(a);
+        progressText.setText("正在连接...");
+        progressText.setTextSize(13);
+        root.addView(progressText);
+
+        Button cancel = new Button(a);
+        cancel.setText("取消下载");
+        cancel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                downloadCancelled = true;
+                Toast.makeText(a, "正在取消...", Toast.LENGTH_SHORT).show();
+            }
+        });
+        root.addView(cancel);
+
+        Dialog d = new Dialog(a);
+        d.setTitle("应用更新");
+        d.setContentView(root);
+        d.setCancelable(false);
+        d.setCanceledOnTouchOutside(false);
+        d.show();
+        progressDialog = d;
+        progressHandler = new Handler(Looper.getMainLooper());
+    }
+
+    private static void dismissProgressDialog() {
+        if (progressDialog != null) {
+            try {
+                progressDialog.dismiss();
+            } catch (Throwable ignored) {
+            }
+            progressDialog = null;
+        }
+        progressBar = null;
+        progressText = null;
+        progressHandler = null;
+    }
+
+    private static void postProgress(final Activity a, final long done, final long total,
+                                     final int idx, final int count) {
+        final Handler h = progressHandler;
+        if (h == null) {
+            return;
+        }
+        h.post(new Runnable() {
+            @Override
+            public void run() {
+                if (progressBar == null || progressText == null) {
+                    return;
+                }
+                int pct = total > 0 ? (int) (done * 100 / total) : 0;
+                if (pct < 0) {
+                    pct = 0;
+                }
+                if (pct > 100) {
+                    pct = 100;
+                }
+                progressBar.setProgress(pct);
+                progressText.setText(String.format(Locale.US, "%d%%  %s / %s  (源 %d/%d)",
+                        pct, human(done), human(total), idx + 1, count));
+            }
+        });
+    }
+
+    private static String human(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        if (bytes < 1048576) {
+            return String.format(Locale.US, "%.0f KB", bytes / 1024.0);
+        }
+        return String.format(Locale.US, "%.1f MB", bytes / 1048576.0);
+    }
+
+    /** 按候选列表逐个下载；失败或校验不过就换下一个源 */
+    private static void downloadNext(final Activity a, final List<String> urls, final int idx,
+                                     final String file, final String expectSha,
+                                     final String version) {
         if (idx >= urls.size()) {
+            dismissProgressDialog();
             Toast.makeText(a, "所有下载源都失败了", Toast.LENGTH_LONG).show();
             return;
         }
         final String url = urls.get(idx);
-        try {
-            DownloadManager dm = (DownloadManager) a.getSystemService(Context.DOWNLOAD_SERVICE);
-            if (dm == null) {
-                Toast.makeText(a, "系统下载服务不可用", Toast.LENGTH_LONG).show();
-                return;
+        Log.i(TAG, "开始下载（源 " + (idx + 1) + "/" + urls.size() + "）" + url);
+        final File target = new File(downloadDir(a), file);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final int rc = downloadFile(a, url, target, expectSha, idx, urls.size());
+                a.runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (rc == DL_OK) {
+                            dismissProgressDialog();
+                            install(a, file, expectSha);
+                        } else if (rc == DL_CANCELLED) {
+                            dismissProgressDialog();
+                            if (target.exists() && !target.delete()) {
+                                Log.w(TAG, "清理取消后的半截文件失败");
+                            }
+                        } else {
+                            Log.w(TAG, "源 " + (idx + 1) + " 没成功（rc=" + rc + "），换下一个");
+                            downloadNext(a, urls, idx + 1, file, expectSha, version);
+                        }
+                    }
+                });
             }
-            DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-            req.setTitle("TVBox " + version);
-            req.setDescription((idx == 0 ? "" : "备用源 " + (idx + 1) + " · ") + file);
-            req.setMimeType("application/vnd.android.package-archive");
-            req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, file);
-
-            long id = dm.enqueue(req);
-            Log.i(TAG, "下载源 " + (idx + 1) + "/" + urls.size() + " -> " + url);
-            Toast.makeText(a, idx == 0 ? ("开始下载 " + version)
-                            : ("换备用源重试（第 " + (idx + 1) + " 个）"),
-                    Toast.LENGTH_SHORT).show();
-            pollDownload(a, dm, id, file, expectSha, urls, idx, version);
-        } catch (Throwable e) {
-            Log.w(TAG, "发起下载失败，换下一个源", e);
-            enqueueDownload(a, urls, idx + 1, file, expectSha, version);
-        }
+        }, "tvbox-update-download").start();
     }
 
     /**
-     * DownloadManager 没有可靠的跨进程回调，只能轮询。三种收工条件：
-     *   1. 拿到终态（成功 → 校验安装；失败 → 换源重试）
-     *   2. 下载记录从下载库里消失（被用户清空 / 被系统回收）——再等也等不到状态变化
-     *   3. 等满 POLL_MAX_TRIES 次仍未完成（约 1 小时）——给用户一句明确的话，别静默结束
-     * 注意区分「查不到记录」和「从未入库」：首次查询允许几次落空（MISS_TOLERANCE）。
+     * 应用内下载：边下边算 sha256，下完直接比对（不用把几十 MB 再读一遍）。
+     *
+     * @return DL_OK / DL_FAILED / DL_SHA / DL_CANCELLED
      */
-    private static void pollDownload(final Activity a, final DownloadManager dm, final long id,
-                                     final String file, final String expectSha,
-                                     final List<String> urls, final int idx, final String version) {
-        final Handler h = new Handler(Looper.getMainLooper());
-        h.postDelayed(new Runnable() {
-            int tries = 0;
-            /** 曾经查到过记录。查过又消失 ⇒ 是被外部清理了，可以直接收工 */
-            boolean seen = false;
-
-            @Override
-            public void run() {
-                tries++;
-                Cursor c = null;
-                int failedReason = -1;
-                boolean found = false;
-                try {
-                    c = dm.query(new DownloadManager.Query().setFilterById(id));
-                    if (c != null && c.moveToFirst()) {
-                        found = true;
-                        int status = c.getInt(c.getColumnIndex(DownloadManager.COLUMN_STATUS));
-                        if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                            // 把候选列表一并传下去：sha256 校验不过时要能换下一个源重试
-                            install(a, file, expectSha, urls, idx, version);
-                            return;
-                        }
-                        if (status == DownloadManager.STATUS_FAILED) {
-                            failedReason = c.getInt(c.getColumnIndex(DownloadManager.COLUMN_REASON));
-                        }
-                    }
-                } catch (Throwable e) {
-                    Log.w(TAG, "查询下载状态失败", e);
-                } finally {
-                    if (c != null) {
-                        c.close();
-                    }
-                }
-
-                if (failedReason >= 0) {
-                    Log.w(TAG, "下载源 " + (idx + 1) + " 失败，原因码 " + failedReason);
-                    // 清掉失败任务和可能留下的半截文件，否则换源会撞 ERROR_FILE_ALREADY_EXISTS
-                    try {
-                        dm.remove(id);
-                    } catch (Throwable e) {
-                        Log.w(TAG, "移除失败任务出错", e);
-                    }
-                    deletePartial(file);
-                    enqueueDownload(a, urls, idx + 1, file, expectSha, version);
-                    return;
-                }
-
-                if (found) {
-                    seen = true;
-                } else if (seen || tries >= POLL_MISS_TOLERANCE) {
-                    // 记录没了：外部清空下载、或系统回收了任务。继续轮询只会空转到超时
-                    Log.w(TAG, "下载记录已消失（第 " + tries + " 次查询），停止轮询");
-                    Toast.makeText(a, "下载任务已丢失，请重新点击升级", Toast.LENGTH_LONG).show();
-                    return;
-                }
-
-                if (tries >= POLL_MAX_TRIES) {
-                    // 原来是静默结束，用户会以为"点了没反应"
-                    Log.w(TAG, "等待下载超时（" + (POLL_MAX_TRIES * POLL_INTERVAL_MS / 60000)
-                            + " 分钟），停止轮询");
-                    Toast.makeText(a, "下载超时，请重新点击升级", Toast.LENGTH_LONG).show();
-                    return;
-                }
-                h.postDelayed(this, POLL_INTERVAL_MS);
-            }
-        }, POLL_INTERVAL_MS);
-    }
-
-    @SuppressWarnings("deprecation")
-    private static void deletePartial(String file) {
+    private static int downloadFile(Activity a, String url, File target, String expectSha,
+                                    int idx, int count) {
+        HttpURLConnection conn = null;
+        InputStream in = null;
+        FileOutputStream out = null;
         try {
-            File f = new File(Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_DOWNLOADS), file);
-            if (f.exists()) {
-                Log.i(TAG, "清理半截文件 " + file + " -> " + f.delete());
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            conn = (HttpURLConnection) new URL(url).openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(20000);
+            conn.setInstanceFollowRedirects(true);
+            conn.setRequestProperty("User-Agent", UA);
+            int code = conn.getResponseCode();
+            if (code < 200 || code >= 300) {
+                Log.w(TAG, "HTTP " + code + " <- " + url);
+                return DL_FAILED;
             }
+            long total = conn.getContentLengthLong();
+            in = conn.getInputStream();
+            out = new FileOutputStream(target);
+            byte[] buf = new byte[65536];
+            long done = 0;
+            int n;
+            long last = 0;
+            while ((n = in.read(buf)) > 0) {
+                if (downloadCancelled) {
+                    Log.i(TAG, "用户取消了下载");
+                    return DL_CANCELLED;
+                }
+                out.write(buf, 0, n);
+                md.update(buf, 0, n);
+                done += n;
+                long now = System.currentTimeMillis();
+                if (now - last >= 500) {
+                    last = now;
+                    postProgress(a, done, total, idx, count);
+                }
+            }
+            out.flush();
+            if (expectSha != null && expectSha.length() == 64) {
+                String actual = toHex(md.digest());
+                if (!expectSha.equalsIgnoreCase(actual)) {
+                    Log.w(TAG, "源 " + (idx + 1) + " 校验失败，期望=" + expectSha
+                            + " 实际=" + actual + " <- " + url);
+                    target.delete();
+                    return DL_SHA;
+                }
+            }
+            Log.i(TAG, "下载完成并校验通过: " + target.getAbsolutePath());
+            return DL_OK;
         } catch (Throwable e) {
-            Log.w(TAG, "清理半截文件出错", e);
+            Log.w(TAG, "下载失败 <- " + url, e);
+            return DL_FAILED;
+        } finally {
+            closeQuietly(in);
+            closeQuietly(out);
+            if (conn != null) {
+                conn.disconnect();
+            }
         }
     }
+
+    private static String toHex(byte[] digest) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < digest.length; i++) {
+            sb.append(String.format(Locale.US, "%02x", digest[i]));
+        }
+        return sb.toString();
+    }
+
+    private static void closeQuietly(java.io.Closeable c) {
+        if (c == null) {
+            return;
+        }
+        try {
+            c.close();
+        } catch (Throwable ignored) {
+        }
+    }
+
+
 
     /**
      * 下载成功后校验并拉起安装。
      *
      * sha256 不过就当作「这个源不可用」——删掉文件、换下一个候选源重试。
-     * 典型场景：某个代理返回 200 但内容是 HTML 错误页，DownloadManager 会认为下载成功。
+     * 典型场景：某个代理返回 200 但内容是 HTML 错误页 —— 系统 DownloadManager 会认为
+     * 下载成功，我们自己的下载器也一样，所以必须靠 sha256 把它拦住。
      * 注意重试不影响安全性：sha256 仍然是唯一的放行依据，任何一个源都过不了就整体中止，
      * 绝不会安装未通过校验的文件（fail-closed）。
      */
+    /**
+     * 校验并拉起安装。优先 ACTION_VIEW + FileProvider；
+     * 有些电视 ROM 上没有能处理 ACTION_VIEW 的安装器，就退回 PackageInstaller（API 21+）。
+     */
     @SuppressWarnings("deprecation")
-    private static void install(Activity a, String file, String expectSha,
-                                List<String> urls, int idx, String version) {
+    private static void install(Activity a, String file, String expectSha) {
         try {
-            File apk = new File(Environment.getExternalStoragePublicDirectory(
-                    Environment.DIRECTORY_DOWNLOADS), file);
+            File apk = new File(downloadDir(a), file);
             if (!apk.exists()) {
-                Toast.makeText(a, "安装包不存在：" + apk.getAbsolutePath(), Toast.LENGTH_LONG).show();
+                Toast.makeText(a, "安装包不存在：" + apk.getAbsolutePath(),
+                        Toast.LENGTH_LONG).show();
                 return;
             }
+            // sha256 下载时已经算过一遍；这里再算一次是兜底，防止「下载完到安装前」文件被换过
             if (expectSha != null && expectSha.length() == 64) {
                 String actual = sha256(apk);
                 if (!expectSha.equalsIgnoreCase(actual)) {
                     apk.delete();
-                    Log.w(TAG, "源 " + (idx + 1) + "/" + urls.size() + " 校验失败，期望="
-                            + expectSha + " 实际=" + actual + " <- " + urls.get(idx));
-                    if (idx + 1 >= urls.size()) {
-                        Toast.makeText(a, "所有下载源都没通过完整性校验，已中止",
-                                Toast.LENGTH_LONG).show();
-                        return;
-                    }
-                    Toast.makeText(a, "第 " + (idx + 1) + " 个源校验失败，换源重试",
-                            Toast.LENGTH_LONG).show();
-                    enqueueDownload(a, urls, idx + 1, file, expectSha, version);
+                    Log.w(TAG, "安装前复检失败，已删除。期望=" + expectSha + " 实际=" + actual);
+                    Toast.makeText(a, "安装包校验失败，已删除", Toast.LENGTH_LONG).show();
                     return;
                 }
             }
@@ -661,12 +806,79 @@ public class UpdateChecker {
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
             a.startActivity(i);
         } catch (ActivityNotFoundException e) {
-            Toast.makeText(a, "系统里没有可用的安装器", Toast.LENGTH_LONG).show();
+            Log.w(TAG, "没有能处理 ACTION_VIEW 的安装器，改用 PackageInstaller", e);
+            installViaSession(a, file);
         } catch (Throwable e) {
             Log.w(TAG, "拉起安装失败", e);
             Toast.makeText(a, "拉起安装失败：" + e, Toast.LENGTH_LONG).show();
         }
     }
+
+    /** 用 PackageInstaller 装（API 21+），不依赖外部安装器 App */
+    private static void installViaSession(final Activity a, final String file) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    final File apk = new File(downloadDir(a), file);
+                    PackageInstaller pi = a.getPackageManager().getPackageInstaller();
+                    PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
+                            PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+                    int id = pi.createSession(params);
+                    PackageInstaller.Session session = pi.openSession(id);
+                    OutputStream out = session.openWrite("update", 0, apk.length());
+                    FileInputStream in = new FileInputStream(apk);
+                    byte[] buf = new byte[65536];
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                    }
+                    session.fsync(out);
+                    out.close();
+                    in.close();
+
+                    final String action = a.getPackageName() + ".INSTALL_RESULT";
+                    final BroadcastReceiver r = new BroadcastReceiver() {
+                        @Override
+                        public void onReceive(Context ctx, Intent intent) {
+                            int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1);
+                            String msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+                            Log.i(TAG, "安装结果 status=" + status + " msg=" + msg);
+                            try {
+                                a.unregisterReceiver(this);
+                            } catch (Throwable ignored) {
+                            }
+                            if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                                return;
+                            }
+                            Toast.makeText(a, status == PackageInstaller.STATUS_SUCCESS
+                                    ? "安装完成" : ("安装失败：" + msg), Toast.LENGTH_LONG).show();
+                        }
+                    };
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        a.registerReceiver(r, new IntentFilter(action),
+                                Context.RECEIVER_NOT_EXPORTED);
+                    } else {
+                        a.registerReceiver(r, new IntentFilter(action));
+                    }
+                    session.commit(PendingIntent.getBroadcast(a, 0, new Intent(action),
+                            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
+                    session.close();
+                    Log.i(TAG, "已提交 PackageInstaller 会话");
+                } catch (Throwable t) {
+                    Log.w(TAG, "PackageInstaller 安装失败", t);
+                    a.runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(a, "安装失败，可尝试手动安装 " + file,
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
+                }
+            }
+        }, "tvbox-update-install").start();
+    }
+
 
     private static String sha256(File f) {
         try {
