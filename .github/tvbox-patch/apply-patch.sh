@@ -119,9 +119,11 @@ if ! grep -q 'UpdateChecker.check(this);' "$HOME_ACT"; then
   echo "[patch] 注入失败：HomeActivity 里没有找到调用" >&2
   exit 1
 fi
-# 灰度化的效果自检：res 里不该再有任何非灰的 hex 色值。
-# 只告警不失败 —— 配色是外观问题，上游新增一种颜色写法不该把出包卡死；
-# 真有问题时 CI 日志里能看见数量，装到机器上一眼也能看出来。
+# 灰度化的效果自检：res 里不该再有彩色残留。
+# 有残留只告警不失败 —— 配色是外观问题，上游新增一种颜色写法不该把出包卡死。
+# ⚠️ 这里**只查色相、不查位数**：位数由 grayscale.py 在"生成的那一刻"断言
+#    （convert_text 里逐个校验自己产出的值）。千万别改成事后扫全文件的 hex ——
+#    res 里有大量 XML 数字字符实体（android:text="&#x51C6;&#x5907;…"），会被误判成色值。
 "$PYTHON_BIN" - <<'PY'
 import io, os, re
 HEX = re.compile(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b')
@@ -132,14 +134,15 @@ for root, _d, files in os.walk('app/src/main/res'):
             continue
         p = os.path.join(root, fn)
         with io.open(p, encoding='utf-8', errors='ignore') as fh:
-            for m in HEX.finditer(fh.read()):
-                s = m.group(1).lower()
-                # Android 是 #AARRGGBB，RGB 在后 6 位（别按 CSS 的 #RRGGBBAA 解析）
-                if len(s) == 8:
-                    s = s[2:]
-                r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
-                if max(r, g, b) - min(r, g, b) > 6:
-                    bad.append('%s 里还有彩色 #%s' % (p, m.group(1)))
+            text = fh.read()
+        for m in HEX.finditer(text):
+            s = m.group(1).lower()
+            # Android 是 #AARRGGBB，RGB 在后 6 位（别按 CSS 的 #RRGGBBAA 解析）
+            if len(s) == 8:
+                s = s[2:]
+            r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+            if max(r, g, b) - min(r, g, b) > 6:
+                bad.append('%s 里还有彩色 #%s' % (p, m.group(1)))
 if bad:
     print('[patch] ⚠️ 灰度自检：仍有彩色残留 %d 处（不阻断构建）' % len(bad))
     for b in bad[:8]:

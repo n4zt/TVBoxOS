@@ -43,12 +43,14 @@ OVERRIDES = {
     '#ff4081': '#e6e6e6',                        # 进度条描边与滑块
     '#07c160': '#e8e8e8',                        # style.css 主按钮底色（微信绿）
     '#06ae56': '#dcdcdc',
-    '#10aeff': '#e0e0e0e', '#1196ff': '#e0e0e0e', '#1485ee': '#e0e0e0e',
+    '#10aeff': '#e0e0e0', '#1196ff': '#e0e0e0', '#1485ee': '#e0e0e0',
     '#0075e2': '#dcdcdc', '#007dbb': '#dcdcdc',
-    '#cbf46a': '#e0e0e0e', '#90ca09': '#dcdcdc', '#ffce7900': '#e0e0e0e',
+    # ⚠️ 下面这行曾经写成 '#e0e0e0e'（7 位），aapt2 直接报 "Invalid <color>" 编译失败。
+    #    现在 validate_overrides() 会在跑之前先拦一遍这种错字。
+    '#cbf46a': '#e0e0e0', '#90ca09': '#dcdcdc', '#ffce7900': '#e0e0e0',
     '#00ff0a': '#dcdcdc', '#00ff00': '#dcdcdc',
     '#bb8e00': '#d0d0d0', '#4f8400': '#c8c8c8', '#74a800': '#c8c8c8', '#2e8800': '#a8a8a8',
-    '#95ec69': '#d8d8d8', '#91d300': '#d0d0d0', '#74A800': '#c8c8c8',
+    '#95ec69': '#d8d8d8', '#91d300': '#d0d0d0',
 }
 
 # ---------------------------------------------------------------- 2) Java 定点替换
@@ -136,6 +138,39 @@ HSLA_RE = re.compile(
     r'hsla\(\s*([-+0-9.]+)\s*,\s*([-+0-9.]+)%\s*,\s*([-+0-9.]+)%\s*,\s*([-+0-9.]+)\s*\)', re.I)
 RGB_RE = re.compile(r'rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)')
 CSS_ARG_RE = re.compile(r'\b(hsla?|rgba?)\(([^()]*)\)', re.I)
+VALID_HEX_RE = re.compile(r'^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$')
+
+
+def validate_overrides():
+    """跑之前先自检 OVERRIDES 表：键值都必须是合法色值，且目标值本身得是灰的。
+
+    这道闸门是被真实事故逼出来的：表里写过 '#e0e0e0e'（**7 位**）——
+    aapt2 只接受 3/4/6/8 位，于是 colors.xml 报 "Invalid <color>"，
+    整个 :app:mergeXxxReleaseResources 失败，一轮 8 分钟的构建白跑。
+    （同一批错字在 style.css 里的那 3 处更阴：CSS 会静默忽略，颜色留着不变。）
+    """
+    bad = []
+    for k, v in OVERRIDES.items():
+        if not VALID_HEX_RE.match(k):
+            bad.append('键 %s 不是合法色值' % k)
+        if not VALID_HEX_RE.match(v):
+            bad.append('值 %s -> %s：%s 不是合法色值（位数只能 3/4/6/8）' % (k, v, v))
+            continue
+        s = v[1:].lower()
+        rgb = s[2:] if len(s) == 8 else s
+        r, g, b = int(rgb[0:2], 16), int(rgb[2:4], 16), int(rgb[4:6], 16)
+        if max(r, g, b) - min(r, g, b) > 6:
+            bad.append('值 %s -> %s：目标色不是灰' % (k, v))
+    # 大小写重复的键等于没写（查找前会转小写），顺手报出来
+    seen = {}
+    for k in OVERRIDES:
+        lk = k.lower()
+        if lk in seen:
+            bad.append('键 %s 与 %s 大小写重复，后者永远匹配不上' % (k, seen[lk]))
+        seen[lk] = k
+    if bad:
+        raise SystemExit('[gray] OVERRIDES 表有问题，已中止：\n  - ' + '\n  - '.join(bad))
+    print('[gray] OVERRIDES 自检通过（%d 条，键值合法且目标色均为灰）' % len(OVERRIDES))
 
 
 def convert_text(text):
@@ -145,10 +180,17 @@ def convert_text(text):
         raw = m.group(0)
         low = raw.lower()
         if low in OVERRIDES:
+            out = OVERRIDES[low]
             stats['override'] += 1
-            return OVERRIDES[low]
-        stats['hex'] += 1
-        return grey_hex(low)
+        else:
+            out = grey_hex(low)
+            stats['hex'] += 1
+        # 只在这里断言：自己**生成**的色值必须是合法的（3/4/6/8 位）。
+        # 千万别改成"事后扫全文件找非法 hex"——res 里有大量 XML 数字字符实体
+        # （android:text="&#x51C6;&#x5907;…" 这种），会把它们误判成色值而误杀。
+        if not VALID_HEX_RE.match(out):
+            raise SystemExit('[gray] 生成了非法色值 %s（来源 %s）——位数只能 3/4/6/8' % (out, raw))
+        return out
 
     text = HEX_RE.sub(hex_sub, text)
 
@@ -187,6 +229,7 @@ def check_css(text):
 
 
 def main():
+    validate_overrides()
     changed = []
     css_bad = []
     total = {'hex': 0, 'override': 0, 'hsla': 0, 'rgba': 0}
