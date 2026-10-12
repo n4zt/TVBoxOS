@@ -26,12 +26,22 @@ UPDATE_JSON_MIRRORS="${3:-}"
 # 代理前缀要进 sed 替换串，需转义 \ & | 这三个特殊字符
 escape_sed() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 
+# Git Bash（Windows）上 `pwd` 返回 /c/... 这种 MSYS 路径，Windows 版 python 解析不了；
+# Linux runner 上没有 cygpath，原样返回即可。
+nativepath() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 if [ ! -f "$HOME_ACT" ]; then
   echo "[patch] 找不到 $HOME_ACT，工作目录不对？当前：$(pwd)" >&2
   exit 1
 fi
 
-echo "[patch] 1/4 注入 UpdateChecker.java"
+echo "[patch] 1/5 注入 UpdateChecker.java"
 mkdir -p "$UTIL_DIR"
 cp -f "$PATCH_DIR/UpdateChecker.java" "$UTIL_DIR/UpdateChecker.java"
 # 占位符替换（用 | 作分隔符，避免 URL 里的 / 干扰）
@@ -48,7 +58,7 @@ fi
 sed -i "s|__UPDATE_JSON_RAW__||g; s|__UPDATE_JSON_CDN__||g; s|__UPDATE_JSON_MIRRORS__||g" "$UTIL_DIR/UpdateChecker.java"
 grep -n 'UPDATE_JSON_RAW\|UPDATE_JSON_CDN\|UPDATE_JSON_MIRRORS' "$UTIL_DIR/UpdateChecker.java" || true
 
-echo "[patch] 2/4 为 6 个 flavor 生成版本标识资源"
+echo "[patch] 2/5 为 6 个 flavor 生成版本标识资源"
 for f in $FLAVORS; do
   mkdir -p "app/src/$f/res/values"
   cat > "app/src/$f/res/values/tvbox_flavor.xml" <<EOF
@@ -60,7 +70,7 @@ EOF
 done
 ls -1 app/src/*/res/values/tvbox_flavor.xml
 
-echo "[patch] 3/4 注入 import"
+echo "[patch] 3/5 注入 import"
 if ! grep -q 'com\.github\.tvbox\.osc\.util\.UpdateChecker' "$HOME_ACT"; then
   sed -i 's#^import me\.jessyan\.autosize\.utils\.AutoSizeUtils;$#import me.jessyan.autosize.utils.AutoSizeUtils;\nimport com.github.tvbox.osc.util.UpdateChecker;#' "$HOME_ACT"
   echo "[patch] 已插入 import"
@@ -68,7 +78,7 @@ else
   echo "[patch] import 已存在，跳过"
 fi
 
-echo "[patch] 4/4 在 init() 末尾追加 UpdateChecker.check(this)"
+echo "[patch] 4/5 在 init() 末尾追加 UpdateChecker.check(this)"
 "$PYTHON_BIN" - "$HOME_ACT" <<'PY'
 import io, sys
 
@@ -95,10 +105,46 @@ io.open(path, 'w', encoding='utf-8').write(src)
 print('[patch] 已注入 UpdateChecker.check(this)')
 PY
 
+echo "[patch] 5/5 应用灰度配色（灰黑白）"
+# 只想保留上游配色时，构建时传 GRAYSCALE=0 跳过这一步
+if [ "${GRAYSCALE:-1}" = "1" ]; then
+  "$PYTHON_BIN" "$(nativepath "$PATCH_DIR/grayscale.py")"
+else
+  echo "[patch] GRAYSCALE=0，跳过灰度配色"
+fi
+
 echo "[patch] 校验结果"
 grep -n 'UpdateChecker' "$HOME_ACT"
 if ! grep -q 'UpdateChecker.check(this);' "$HOME_ACT"; then
   echo "[patch] 注入失败：HomeActivity 里没有找到调用" >&2
   exit 1
 fi
+# 灰度化的效果自检：res 里不该再有任何非灰的 hex 色值。
+# 只告警不失败 —— 配色是外观问题，上游新增一种颜色写法不该把出包卡死；
+# 真有问题时 CI 日志里能看见数量，装到机器上一眼也能看出来。
+"$PYTHON_BIN" - <<'PY'
+import io, os, re
+HEX = re.compile(r'#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b')
+bad = []
+for root, _d, files in os.walk('app/src/main/res'):
+    for fn in files:
+        if not fn.endswith(('.xml', '.css')):
+            continue
+        p = os.path.join(root, fn)
+        with io.open(p, encoding='utf-8', errors='ignore') as fh:
+            for m in HEX.finditer(fh.read()):
+                s = m.group(1).lower()
+                # Android 是 #AARRGGBB，RGB 在后 6 位（别按 CSS 的 #RRGGBBAA 解析）
+                if len(s) == 8:
+                    s = s[2:]
+                r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+                if max(r, g, b) - min(r, g, b) > 6:
+                    bad.append('%s 里还有彩色 #%s' % (p, m.group(1)))
+if bad:
+    print('[patch] ⚠️ 灰度自检：仍有彩色残留 %d 处（不阻断构建）' % len(bad))
+    for b in bad[:8]:
+        print('        ' + b)
+else:
+    print('[patch] 灰度自检通过：res 里已无非灰色值')
+PY
 echo "[patch] 完成"
