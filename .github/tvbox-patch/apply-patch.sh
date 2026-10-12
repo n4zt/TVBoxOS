@@ -105,12 +105,20 @@ io.open(path, 'w', encoding='utf-8').write(src)
 print('[patch] 已注入 UpdateChecker.check(this)')
 PY
 
-echo "[patch] 5/5 应用灰度配色（灰黑白）"
+echo "[patch] 5/5 应用灰度配色（灰黑白）+ 替换窗口背景图"
 # 只想保留上游配色时，构建时传 GRAYSCALE=0 跳过这一步
 if [ "${GRAYSCALE:-1}" = "1" ]; then
   "$PYTHON_BIN" "$(nativepath "$PATCH_DIR/grayscale.py")"
+  # 窗口背景：删掉那张 1280x720 的照片，换成灰阶 shape。
+  # 必须先删同名 .jpg —— 同名资源共存会让 aapt2 报 duplicate resource 直接失败。
+  if [ -f app/src/main/res/drawable/app_bg.jpg ]; then
+    rm -f app/src/main/res/drawable/app_bg.jpg
+    echo "[patch] 已移除原背景图 app_bg.jpg"
+  fi
+  cp -f "$PATCH_DIR/app_bg.xml" app/src/main/res/drawable/app_bg.xml
+  ls -l app/src/main/res/drawable/app_bg.*
 else
-  echo "[patch] GRAYSCALE=0，跳过灰度配色"
+  echo "[patch] GRAYSCALE=0，跳过灰度配色与背景替换"
 fi
 
 echo "[patch] 校验结果"

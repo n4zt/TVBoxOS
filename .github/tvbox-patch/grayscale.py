@@ -89,6 +89,20 @@ JAVA_RULES = [
     # 播放器进度条描边（与 OVERRIDES 里的 #ff4081 呼应，这里是 parseColor 形式）
     ('player/controller/VodController.java', 'Color.parseColor("#FF4081")',
      'Color.parseColor("#E6E6E6")', 1),
+    # 窗口背景：忽略 config 里的 wallpaper，固定用灰阶 app_bg
+    #   （配置里带 wallpaper 时，App 会下载它当背景 —— 那样光改 drawable 是白改。
+    #     BaseActivity 没有 import ApiConfig，所以这里直接绕过 wallpaper 分支，
+    #     不碰它的配置读取，改动面最小、也不可能编译不过。）
+    ('base/BaseActivity.java',
+     '        if (!force && globalWp != null)\n            getWindow().setBackgroundDrawable(globalWp);',
+     '        // [灰度定制] 忽略 config 里的 wallpaper，窗口背景固定用灰阶 app_bg',
+     1),
+    ('base/BaseActivity.java',
+     '        if (globalWp != null)\n            getWindow().setBackgroundDrawable(globalWp);\n'
+     '        else\n            getWindow().setBackgroundDrawableResource(R.drawable.app_bg);',
+     '        // [灰度定制] 不用 wallpaper（哪怕本机缓存过），直接给灰阶背景\n'
+     '        getWindow().setBackgroundDrawableResource(R.drawable.app_bg);',
+     1),
 ]
 
 # 弹幕调色板：16 色 → 16 级灰阶（保留亮度差，弹幕在视频上更易读）
