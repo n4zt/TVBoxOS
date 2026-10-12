@@ -4,16 +4,15 @@
   这个文件由 apply-patch.sh 拷进 app/src/main/res/drawable/ 并删掉同名 .jpg
   —— 同名资源共存会让 aapt2 报 duplicate resource，所以必须删旧的。
 
-  想改配色就改下面两个色值：
-    - 深灰底（与深色 UI 面板 #1E1E1E 形成层次）＝ #FF1A1A1A → #FF101010（当前）
-    - 纯色灰底：把 <gradient> 换成 <solid android:color="#FF1A1A1A" />
-    - 浅灰底：换成 #FF808080 之类（注意：白字在浅灰上会不好读，需一并调文字色）
+  想改配色就改下面那个色值 —— **用纯色，别改成 <gradient>**：
+    - 为什么必须纯色：播放器的 windowBackground 是透明的（styles.xml 里
+      AppTheme.NoActionBar 设了 @android:color/transparent），播放器那排半透明按钮
+      （全屏 / 快搜 / 返回…）会把窗口背景透出来 —— 背景一旦是渐变，那些按钮就会
+      看起来被染上渐变色调。
+    - 深灰 #FF171717（当前，与面板色 #1E1E1E 形成层次）
+    - 浅灰 #FF808080 之类也行，但白字在浅灰上不好读，要一并调文字色
 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <gradient
-        android:angle="270"
-        android:startColor="#FF1A1A1A"
-        android:endColor="#FF101010"
-        android:type="linear" />
+    <solid android:color="#FF171717" />
 </shape>
