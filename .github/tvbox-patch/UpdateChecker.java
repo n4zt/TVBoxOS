@@ -184,13 +184,32 @@ public class UpdateChecker {
      * ⚠️ 不能用"没注入就是空列表"的逻辑：国内直连 raw.githubusercontent.com 基本不通，
      * 而 jsDelivr 对仓库有约 12 小时缓存（本身也不一定连得上）。两者都挂时更新检查会
      * **完全静默失败**，用户看到的就是"进来不提示更新"。
-     * 实测速度（2026-09-29）：gh-proxy 0.79s / ghfast.top 2.20s / ghproxy.net 4.31s。
      *
-     * 想换成自己的代理：设仓库 Variables 的 PROXY_PREFIXES（编译期注入）或
+     * 下面这 7 个都是 **2026-10-12 实测过的**，而且不只看状态码 —— 还实际取了一小段内容
+     * 确认拿到的是真 update.json。有几个域名返回 200/302 但内容是 HTML 广告/导航页
+     * （ghps.cc / ghproxy.link / gitproxy.click 就是这样），只看状态码会把它们当可用源收进来。
+     * 实测耗时（update.json / release 里的 APK）：
+     *   gh-proxy.com        0.45s / 0.95s
+     *   gh.monlor.com       1.01s / 1.53s
+     *   ghpxy.hwinzniej.top 0.99s / 1.87s
+     *   ghproxy.imciel.com  1.23s / 1.70s
+     *   ghfast.top          1.06s / 2.60s
+     *   gh.nxnow.top        1.89s / 1.57s
+     *   ghproxy.net         1.62s / 5.85s
+     *
+     * 代理会失效，隔段时间重新测一轮（方法：对每个前缀请求 update.json 并 grep
+     * `"version"` 验内容，再对 release 里的 APK 发 Range 请求确认能下载）。
+     * 想换成自己的：设仓库 Variables 的 PROXY_PREFIXES（编译期注入）或
      * update.json 的 mirrors 字段（运行期生效），两者都会覆盖这里。
      */
     private static final String DEFAULT_PROXY_PREFIXES =
-            "https://gh-proxy.com/,https://ghfast.top/,https://ghproxy.net/";
+            "https://gh-proxy.com/,"
+            + "https://gh.monlor.com/,"
+            + "https://ghpxy.hwinzniej.top/,"
+            + "https://ghproxy.imciel.com/,"
+            + "https://ghfast.top/,"
+            + "https://gh.nxnow.top/,"
+            + "https://ghproxy.net/";
 
     private static List<String> defaultProxies() {
         return splitConfig(DEFAULT_PROXY_PREFIXES);
