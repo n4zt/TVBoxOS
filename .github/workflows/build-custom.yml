@@ -363,6 +363,13 @@ jobs:
           git commit -m "chore: update build record for ${{ env.tag }}"
           git push origin HEAD:${{ github.ref_name }}
 
+          # [CUSTOM] 主动清 jsDelivr 缓存。
+          # jsDelivr 按 @main 缓存约 12 小时，而「更新检查」在代理都不可达时只靠它兜底；
+          # 不清的话刚发布的版本可能迟迟读不到（表现为「装了新版但旧版不提示更新」）。
+          # 顺手打一下 purge 接口即可，失败不影响发布，所以吞掉错误。
+          curl -sS -m 25 "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/update.json" \
+            && echo "已请求清理 jsDelivr 缓存" || echo "jsDelivr purge 失败（不影响发布）"
+
   clean:
     needs: build
     runs-on: ubuntu-latest

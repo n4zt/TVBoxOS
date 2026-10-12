@@ -178,6 +178,24 @@ public class UpdateChecker {
         return out;
     }
 
+    /**
+     * 兜底代理前缀。
+     *
+     * ⚠️ 不能用"没注入就是空列表"的逻辑：国内直连 raw.githubusercontent.com 基本不通，
+     * 而 jsDelivr 对仓库有约 12 小时缓存（本身也不一定连得上）。两者都挂时更新检查会
+     * **完全静默失败**，用户看到的就是"进来不提示更新"。
+     * 实测速度（2026-09-29）：gh-proxy 0.79s / ghfast.top 2.20s / ghproxy.net 4.31s。
+     *
+     * 想换成自己的代理：设仓库 Variables 的 PROXY_PREFIXES（编译期注入）或
+     * update.json 的 mirrors 字段（运行期生效），两者都会覆盖这里。
+     */
+    private static final String DEFAULT_PROXY_PREFIXES =
+            "https://gh-proxy.com/,https://ghfast.top/,https://ghproxy.net/";
+
+    private static List<String> defaultProxies() {
+        return splitConfig(DEFAULT_PROXY_PREFIXES);
+    }
+
     /** 去重且保持顺序 */
     private static List<String> dedup(List<String> in) {
         LinkedHashSet<String> set = new LinkedHashSet<String>();
@@ -285,6 +303,12 @@ public class UpdateChecker {
         List<String> fresh = new ArrayList<String>();
         fresh.add(UPDATE_JSON_RAW);
         List<String> proxies = splitConfig(UPDATE_JSON_MIRRORS);
+        if (proxies.isEmpty()) {
+            // 编译期没注入 PROXY_PREFIXES 时不能就这么算了：raw 直连基本不通，
+            // 只靠 jsDelivr 兜底等于把更新检查挂在 12 小时缓存上（甚至直接连不上）。
+            proxies = defaultProxies();
+            Log.i(TAG, "未注入 PROXY_PREFIXES，使用内置兜底代理 " + proxies.size() + " 个");
+        }
         for (int i = 0; i < proxies.size() && !UPDATE_JSON_RAW.isEmpty(); i++) {
             fresh.add(proxify(proxies.get(i), UPDATE_JSON_RAW));
         }
@@ -355,6 +379,11 @@ public class UpdateChecker {
             }
         } catch (Throwable e) {
             Log.w(TAG, "解析 mirrors 失败", e);
+        }
+        if (out.isEmpty()) {
+            // 清单里没配 mirrors 时也要给下载留退路，否则 APK 只剩 GitHub 直链
+            // （国内很慢），换源重试也没有第二个源可换。
+            out = defaultProxies();
         }
         return out;
     }
