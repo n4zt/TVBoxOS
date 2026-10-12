@@ -806,8 +806,13 @@ public class UpdateChecker {
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
             a.startActivity(i);
         } catch (ActivityNotFoundException e) {
-            Log.w(TAG, "没有能处理 ACTION_VIEW 的安装器，改用 PackageInstaller", e);
-            installViaSession(a, file);
+            // PackageInstaller 是 API 21+，19/20 上只能提示用户
+            if (Build.VERSION.SDK_INT >= 21) {
+                Log.w(TAG, "没有能处理 ACTION_VIEW 的安装器，改用 PackageInstaller", e);
+                installViaSession(a, file);
+            } else {
+                Toast.makeText(a, "系统里没有可用的安装器", Toast.LENGTH_LONG).show();
+            }
         } catch (Throwable e) {
             Log.w(TAG, "拉起安装失败", e);
             Toast.makeText(a, "拉起安装失败：" + e, Toast.LENGTH_LONG).show();
@@ -861,8 +866,11 @@ public class UpdateChecker {
                     } else {
                         a.registerReceiver(r, new IntentFilter(action));
                     }
+                    // ⚠️ commit() 收的是 IntentSender，不是 PendingIntent ——
+                    //    直接传 PendingIntent 是编译错误（CI run #20 就是这么挂的）
                     session.commit(PendingIntent.getBroadcast(a, 0, new Intent(action),
-                            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
+                            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)
+                            .getIntentSender());
                     session.close();
                     Log.i(TAG, "已提交 PackageInstaller 会话");
                 } catch (Throwable t) {
