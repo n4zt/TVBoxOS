@@ -9,10 +9,10 @@
       AppTheme.NoActionBar 设了 @android:color/transparent），播放器那排半透明按钮
       （全屏 / 快搜 / 返回…）会把窗口背景透出来 —— 背景一旦是渐变，那些按钮就会
       看起来被染上渐变色调。
-    - 深灰 #FF171717（当前，与面板色 #1E1E1E 形成层次）
-    - 浅灰 #FF808080 之类也行，但白字在浅灰上不好读，要一并调文字色
+    - 深灰 #ff171717（当前，与面板色 #1e1e1e 形成层次）
+    - 浅灰 #ff808080 之类也行，但白字在浅灰上不好读，要一并调文字色
 -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <solid android:color="#FF171717" />
+    <solid android:color="#ff171717" />
 </shape>

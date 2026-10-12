@@ -30,13 +30,26 @@ RES_DIRS = ['app/src/main/res', 'player/src/main/res', 'quickjs/src/main/res', '
 JAVA = 'app/src/main/java/com/github/tvbox/osc'
 
 # ---------------------------------------------------------------- 1) 语义覆盖
-# 灰度化最容易踩的坑：把"聚焦态/选中态"也按亮度换成中灰，遥控器操作就分不清选中项了。
-# 所以下面这些按用途指定，不参与自动转换。
+# 灰度化最容易踩的坑有**两类**：
+#   ① 把「聚焦/选中态」按亮度换成中灰 -> 遥控器操作分不清选中项
+#   ② 把「按钮的背景填充色」映射成纯白/浅色 -> 按钮变成一块白板，
+#      一排按钮还会变成深浅不一的灰，看着就是"样式不对"
+# 所以下面按用途指定，不参与自动转换。改这里之前先确认那个色是**文字/描边**
+# 还是**填充**（填充色一律给中灰，别给纯白）。
 OVERRIDES = {
-    # 聚焦 / 选中 / 激活：纯白，最强对比
-    '#1890ff': '#ffffff', '#cc1890ff': '#ccffffff', '#331890ff': '#33ffffff',
-    '#02f8e1': '#ffffff', '#cc02f8e1': '#ccffffff',
-    '#ff5f00': '#ffffff',                       # 筛选按钮的激活态
+    # ---- 填充类：详情页那排按钮的背景（原来 5 个各一色）----
+    # 统一成"看得出是按钮"的灰，主按钮(播放)稍亮保留层次。
+    # 反例记录：'#1890ff' 曾被映射成 '#ffffff'，于是「快速搜索」按钮成了白板。
+    '#ff5f00': '#7c7c7c',   # 播放（主按钮；也是筛选图标的激活色）
+    '#1890ff': '#7c7c7c',   # 快速搜索按钮 / 角标底色 / 选中项按钮底色
+    '#90ca09': '#616161',   # 简介
+    '#ff0057': '#616161',   # 加入收藏
+    '#00796b': '#616161',   # 切源
+    '#cc1890ff': '#cc616161',  # 弹幕设置对话框的按钮填充（半透明）
+    '#ffce7900': '#4a4a4a',    # item_right_bg 列表项底色（原来是橙，大面积用深一点的灰）
+    '#331890ff': '#33ffffff',  # 实时页聚焦高亮（是"高亮"不是"填充"，保持最亮）
+    # ---- 文字 / 描边类：纯白，最强对比 ----
+    '#02f8e1': '#ffffff', '#cc02f8e1': '#ccffffff',   # 选中态文字 / 聚焦描边
     # 主题三件套（AppTheme 用）
     '#6200ee': '#ededed', '#3700b3': '#bdbdbd', '#03dac5': '#9e9e9e',
     # 深色背景上的文字/滑块：浅灰，保证可读
@@ -47,7 +60,7 @@ OVERRIDES = {
     '#0075e2': '#dcdcdc', '#007dbb': '#dcdcdc',
     # ⚠️ 下面这行曾经写成 '#e0e0e0e'（7 位），aapt2 直接报 "Invalid <color>" 编译失败。
     #    现在 validate_overrides() 会在跑之前先拦一遍这种错字。
-    '#cbf46a': '#e0e0e0', '#90ca09': '#dcdcdc', '#ffce7900': '#e0e0e0',
+    '#cbf46a': '#e0e0e0',
     '#00ff0a': '#dcdcdc', '#00ff00': '#dcdcdc',
     '#bb8e00': '#d0d0d0', '#4f8400': '#c8c8c8', '#74a800': '#c8c8c8', '#2e8800': '#a8a8a8',
     '#95ec69': '#d8d8d8', '#91d300': '#d0d0d0',
@@ -89,6 +102,35 @@ JAVA_RULES = [
     # 播放器进度条描边（与 OVERRIDES 里的 #ff4081 呼应，这里是 parseColor 形式）
     ('player/controller/VodController.java', 'Color.parseColor("#FF4081")',
      'Color.parseColor("#E6E6E6")', 1),
+    # 实时 EPG / 频道分组：「选中」那行原来用 color_1890FF，而该色现在被当作按钮填充
+    # 映射成 #7c7c7c —— 选中行会比未选中的白字更暗，强调关系反了。
+    # 改成：选中 = 纯白，未选中 = 浅灰。
+    # ⚠️ 必须**整段替换** if/else：拆成「未选中白→浅灰」+「选中引用→白」两条规则时，
+    #    第二轮会把第一条的产物（原选中行已变成白）再匹配一次，把选中行也刷成浅灰。
+    #    幂等测试就是这么抓到的。
+    ('ui/adapter/LiveEpgAdapter.java',
+     '            textview.setTextColor(mContext.getResources().getColor(R.color.color_1890FF));\n'
+     '            timeview.setTextColor(mContext.getResources().getColor(R.color.color_1890FF));\n'
+     '        }else {\n'
+     '            textview.setTextColor(Color.WHITE);\n'
+     '            timeview.setTextColor(Color.WHITE);',
+     '            // [灰度定制] 选中行纯白、未选中浅灰（原来选中用 color_1890FF，\n'
+     '            // 而该色现在被当成按钮填充映射成灰，会比白字更暗、强调关系反了）\n'
+     '            textview.setTextColor(Color.WHITE);\n'
+     '            timeview.setTextColor(Color.WHITE);\n'
+     '        }else {\n'
+     '            textview.setTextColor(Color.LTGRAY);\n'
+     '            timeview.setTextColor(Color.LTGRAY);',
+     1),
+    ('ui/adapter/LiveChannelGroupAdapter.java',
+     '            tvGroupName.setTextColor(mContext.getResources().getColor(R.color.color_1890FF));\n'
+     '        } else {\n'
+     '            tvGroupName.setTextColor(Color.WHITE);',
+     '            // [灰度定制] 选中=纯白、未选中=浅灰（同上，整段替换保证幂等）\n'
+     '            tvGroupName.setTextColor(Color.WHITE);\n'
+     '        } else {\n'
+     '            tvGroupName.setTextColor(Color.LTGRAY);',
+     1),
     # 窗口背景：忽略 config 里的 wallpaper，固定用灰阶 app_bg
     #   （配置里带 wallpaper 时，App 会下载它当背景 —— 那样光改 drawable 是白改。
     #     BaseActivity 没有 import ApiConfig，所以这里直接绕过 wallpaper 分支，
