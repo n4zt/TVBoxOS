@@ -36,3 +36,20 @@
 		}
 	]
     }
+
+=== 同步上游更新（本仓库为自维护 fork） ===
+
+    # 只做一次的配置：把上游加为 upstream remote
+    git remote add upstream git@github.com:q215613905/TVBoxOS.git
+
+    # 日常同步
+    git fetch upstream
+    git merge upstream/main      # 自建定制全在 .github/ 里，与上游源码无重叠，正常零冲突
+    git push origin main         # 触发 Build Custom
+
+    注意：
+    - 不要用 rebase，会把自建提交的 hash 全部重写，打乱 update.json 的增量基准
+    - 合并前可先跑补丁 dry-run：把上游源码解到临时目录，执行
+      bash .github/tvbox-patch/apply-patch.sh <raw> <cdn> <mirrors>，
+      看灰度自检是否通过、锚点是否仍能命中（HomeActivity 的三处锚点是硬依赖）
+    - .github/tvbox-patch/ 是运行时注入，不修改上游源码，所以通常不会产生冲突
