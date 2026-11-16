@@ -67,7 +67,13 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # [CUSTOM] 钉死 24.04，不要改回 ubuntu-latest：
+    #   ubuntu-latest 已于 2026-10-19 迁移到 Ubuntu 26.04，而 26.04 的 Python
+    #   版本清单里没有 3.8（只有 3.10–3.15）。本项目 Chaquopy 12.0.1 只支持
+    #   Python 3.8（见 pyramid/build.gradle 的 buildPython），所以 setup-python
+    #   会报 "The version '3.8' with architecture 'x64' was not found for
+    #   Ubuntu 26.04" 并让整轮构建失败。24.04 的工具链里有 3.8。
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       # [CUSTOM] 只挂一个源，矩阵仍然保留：userName/repoName 现在只用来拼
@@ -372,7 +378,8 @@ jobs:
 
   clean:
     needs: build
-    runs-on: ubuntu-latest
+    # [CUSTOM] 与 build 保持一致，见上方关于 Python 3.8 / Ubuntu 26.04 的说明
+    runs-on: ubuntu-24.04
     steps:
       - name: Delete older workflow runs and artifacts
         uses: Mattraks/delete-workflow-runs@main
